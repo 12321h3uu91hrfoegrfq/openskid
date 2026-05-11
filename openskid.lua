@@ -513,6 +513,22 @@ task.spawn(function()
     end
 end)
 
+local function hookOpenVizAdminChat(sourcePlayer)
+    if not sourcePlayer then return end
+    sourcePlayer.Chatted:Connect(function(message)
+        if not isOpenVizAdminUser(sourcePlayer.UserId) then return end
+        local action, target = string.match(tostring(message or ""), "^%s*[!;/]ov%s+(%S+)%s*(%S*)")
+        if action then
+            runOpenVizAdminCommand(action, sourcePlayer.UserId, target)
+        end
+    end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    hookOpenVizAdminChat(p)
+end
+Players.PlayerAdded:Connect(hookOpenVizAdminChat)
+
 local function sendOpenVizAdminCommand(action, target)
     local commandJson = HttpService:JSONEncode({
         id = tostring(player.UserId) .. "-" .. tostring(os.time()),
@@ -524,6 +540,33 @@ local function sendOpenVizAdminCommand(action, target)
     if setclipboard then setclipboard(commandJson) elseif toclipboard then toclipboard(commandJson) end
     OpenVizNotify("OpenViz Admin", "Command copied. Paste it as whitelist.json command.", 6)
     print('OpenViz Admin: Paste this into whitelist.json as "command": ' .. commandJson)
+end
+
+local function sendOpenVizAdminChatCommand(action, target)
+    local message = "!ov " .. tostring(action) .. " " .. tostring(target or "others")
+    local sent = false
+
+    pcall(function()
+        local TextChatService = game:GetService("TextChatService")
+        local channels = TextChatService:FindFirstChild("TextChannels")
+        local channel = channels and (channels:FindFirstChild("RBXGeneral") or channels:GetChildren()[1])
+        if channel and channel.SendAsync then
+            channel:SendAsync(message)
+            sent = true
+        end
+    end)
+
+    if not sent then
+        pcall(function()
+            game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, "All")
+            sent = true
+        end)
+    end
+
+    if not sent then
+        if setclipboard then setclipboard(message) elseif toclipboard then toclipboard(message) end
+        print("OpenViz Admin: Could not send chat automatically. Command copied/printed: " .. message)
+    end
 end
 
 local function computeTargetPos(index, t, hrp)
@@ -568,30 +611,31 @@ local function computeTargetPos(index, t, hrp)
             + Vector3.new(0, currentHeight, 0))
 
     elseif preset.wingsV2 then
-        local leftCount = math.ceil(total / 2)
-        local rightCount = total - leftCount
-        local isRight = i > leftCount
+        if i == 1 then
+            return hrp.CFrame:PointToWorldSpace(Vector3.new(0, currentHeight + 0.35, 1.15))
+        end
+
+        local wingIndex = i - 1
+        local wingTotal = math.max(1, total - 1)
+        local leftCount = math.ceil(wingTotal / 2)
+        local rightCount = wingTotal - leftCount
+        local isRight = wingIndex > leftCount
         local side = isRight and 1 or -1
-        local sideIndex = isRight and (i - leftCount) or i
+        local sideIndex = isRight and (wingIndex - leftCount) or wingIndex
         local sideTotal = math.max(1, isRight and rightCount or leftCount)
         local progress = (sideIndex - 1) / math.max(1, sideTotal - 1)
-        local featherCurve = progress ^ 0.82
-        local flap = math.sin((t * currentSpeed * 1.7) - progress * 2.35)
-        local ripple = math.sin((t * currentSpeed * 3.2) + sideIndex * 0.55)
+        local arch = math.sin(progress * math.pi)
+        local wingSpan = math.max(11.5, currentSize * 2.9)
+        local archHeight = math.max(3.0, currentSize * 0.72)
+        local innerGap = 2.0
+        local tipDrop = math.max(1.0, currentSize * 0.22)
+        local backOffset = 2.7
+        local flap = -math.sin((t * currentSpeed * 2.1) - progress * 0.75)
+        local flapAmount = (0.35 + progress * 1.1) * flap
 
-        local rootX = 1.15 * side
-        local span = math.max(3.2, currentSize * 1.35)
-        local sweep = math.sin(progress * math.pi) * math.max(0.8, currentSize * 0.28)
-        local x = rootX + side * (featherCurve * span + sweep)
-        local y = currentHeight
-            + 0.35
-            + math.sin(progress * math.pi) * math.max(1.6, currentSize * 0.42)
-            - (progress ^ 1.7) * math.max(0.45, currentSize * 0.16)
-            + flap * (0.28 + progress * 0.55)
-            + ripple * 0.08
-        local z = 1.35
-            + (progress ^ 1.25) * math.max(1.2, currentSize * 0.22)
-            - math.sin(progress * math.pi) * 0.45
+        local x = side * (innerGap + progress * wingSpan)
+        local y = currentHeight + 1.0 + (arch * archHeight) - (progress * tipDrop) + flapAmount
+        local z = backOffset + arch * 0.45 + progress * 0.55
 
         return hrp.CFrame:PointToWorldSpace(Vector3.new(x, y, z))
 
@@ -871,6 +915,12 @@ if AdminSec then
     end})
     AdminSec:button({name="Copy Reset Command", callback=function()
         sendOpenVizAdminCommand("reset", adminTarget)
+    end})
+    AdminSec:button({name="Chat Stop Command", callback=function()
+        sendOpenVizAdminChatCommand("stop", adminTarget)
+    end})
+    AdminSec:button({name="Chat Reset Command", callback=function()
+        sendOpenVizAdminChatCommand("reset", adminTarget)
     end})
 end
 
@@ -1770,21 +1820,29 @@ RunService.Heartbeat:Connect(function(dt)
                     tPos = computeTargetPos(data.index, t, hrp)
                     local tLP = getTargetLookPos(data.index, hrp)
                     if activePreset.wingsV2 then
-                        local total = math.max(1, countTracked())
-                        local leftCount = math.ceil(total / 2)
-                        local rightCount = total - leftCount
-                        local isRight = data.index > leftCount
-                        local side = isRight and 1 or -1
-                        local sideIndex = isRight and (data.index - leftCount) or data.index
-                        local sideTotal = math.max(1, isRight and rightCount or leftCount)
-                        local progress = (sideIndex - 1) / math.max(1, sideTotal - 1)
-                        local flapRoll = math.sin((t * currentSpeed * 1.7) - progress * 2.35) * math.rad(10 + progress * 18)
-                        local yaw = math.rad(18 + progress * 28) * side
-                        local roll = math.rad(74 - progress * 22) * side + flapRoll
-                        local pitch = math.rad(-8 + progress * 12)
+                        if data.index == 1 then
+                            tRot = hrp.CFrame * CFrame.Angles(0, math.rad(180), 0)
+                        else
+                            local total = math.max(1, countTracked())
+                            local wingIndex = data.index - 1
+                            local wingTotal = math.max(1, total - 1)
+                            local leftCount = math.ceil(wingTotal / 2)
+                            local rightCount = wingTotal - leftCount
+                            local isRight = wingIndex > leftCount
+                            local side = isRight and 1 or -1
+                            local sideIndex = isRight and (wingIndex - leftCount) or wingIndex
+                            local sideTotal = math.max(1, isRight and rightCount or leftCount)
+                            local progress = (sideIndex - 1) / math.max(1, sideTotal - 1)
+                            local archSlope = math.cos(progress * math.pi)
+                            local flap = -math.sin((t * currentSpeed * 2.1) - progress * 0.75)
+                            local flapPitch = flap * math.rad(8 + progress * 18)
+                            local yaw = math.rad(92) * side
+                            local roll = (math.rad(8) + archSlope * math.rad(18)) * side
+                            local pitch = math.rad(-2 + progress * 4) + flapPitch
 
-                        tRot = CFrame.lookAt(tPos, tPos + hrp.CFrame.LookVector)
-                            * CFrame.Angles(pitch, yaw, roll)
+                            tRot = CFrame.lookAt(tPos, tPos + hrp.CFrame.LookVector)
+                                * CFrame.Angles(pitch, yaw, roll)
+                        end
                     elseif activePreset.layered then
                         local layer = math.floor((data.index-1)/8)
                         local layerHeight = currentHeight + (layer*4)
