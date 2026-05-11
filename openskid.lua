@@ -444,6 +444,11 @@ local function isOpenVizAdminUser(userId)
     return whitelistLoaded and whitelistData and userIdInList(whitelistData.admins, tonumber(userId))
 end
 
+local function getOpenVizAdminName(userId)
+    local p = Players:GetPlayerByUserId(tonumber(userId) or 0)
+    return p and p.Name or ("UserId " .. tostring(userId))
+end
+
 local function openVizAdminTargetMatches(target, issuerUserId)
     target = string.lower(tostring(target or ""))
     if target == "" then return false end
@@ -457,13 +462,16 @@ local function openVizAdminTargetMatches(target, issuerUserId)
         or string.sub(myDisplay, 1, #target) == target
 end
 
-local function runOpenVizAdminCommand(action, issuer, target)
-    if not openVizAdminTargetMatches(target, issuer.UserId) then return end
+local function runOpenVizAdminCommand(action, issuerUserId, target)
+    issuerUserId = tonumber(issuerUserId)
+    if not issuerUserId or not isOpenVizAdminUser(issuerUserId) then return end
+    if not openVizAdminTargetMatches(target, issuerUserId) then return end
 
     action = string.lower(tostring(action or ""))
+    local issuerName = getOpenVizAdminName(issuerUserId)
     if action == "stop" or action == "off" then
         stopVisualizer()
-        OpenVizNotify("OpenViz Admin", "Visualizer stopped by " .. issuer.Name, 4)
+        OpenVizNotify("OpenViz Admin", "Visualizer stopped by " .. issuerName, 4)
     elseif action == "reset" or action == "respawn" then
         stopVisualizer()
         local char = player.Character
@@ -473,53 +481,49 @@ local function runOpenVizAdminCommand(action, issuer, target)
         elseif char then
             char:BreakJoints()
         end
-        OpenVizNotify("OpenViz Admin", "Reset by " .. issuer.Name, 4)
+        OpenVizNotify("OpenViz Admin", "Reset by " .. issuerName, 4)
     elseif action == "kick" then
-        player:Kick("OpenViz: Kicked by admin " .. issuer.Name)
+        player:Kick("OpenViz: Kicked by admin " .. issuerName)
     end
 end
 
-local function hookOpenVizAdminChat(sourcePlayer)
-    if not sourcePlayer then return end
-    sourcePlayer.Chatted:Connect(function(message)
-        if not isOpenVizAdminUser(sourcePlayer.UserId) then return end
-        local action, target = string.match(tostring(message or ""), "^%s*[!;/]ov%s+(%S+)%s*(%S*)")
-        if action then
-            runOpenVizAdminCommand(action, sourcePlayer, target)
-        end
-    end)
+local lastOpenVizCommandId = nil
+
+local function loadOpenVizCommandData()
+    local loaded, data = loadWhitelist()
+    if loaded and data then
+        whitelistLoaded = loaded
+        whitelistData = data
+        isOpenVizAdmin = userIdInList(whitelistData.admins, player.UserId)
+        return data.command
+    end
+    return nil
 end
 
-for _, p in ipairs(Players:GetPlayers()) do
-    hookOpenVizAdminChat(p)
-end
-Players.PlayerAdded:Connect(hookOpenVizAdminChat)
+task.spawn(function()
+    while task.wait(4) do
+        local command = loadOpenVizCommandData()
+        if type(command) == "table" then
+            local commandId = command.id or command.Id or command.ID
+            if commandId and commandId ~= lastOpenVizCommandId then
+                lastOpenVizCommandId = commandId
+                runOpenVizAdminCommand(command.action, command.issuer or command.issuerUserId, command.target or "others")
+            end
+        end
+    end
+end)
 
 local function sendOpenVizAdminCommand(action, target)
-    local message = "!ov " .. tostring(action) .. " " .. tostring(target or "others")
-    local sent = false
+    local commandJson = HttpService:JSONEncode({
+        id = tostring(player.UserId) .. "-" .. tostring(os.time()),
+        issuer = player.UserId,
+        action = tostring(action),
+        target = tostring(target or "others"),
+    })
 
-    pcall(function()
-        local TextChatService = game:GetService("TextChatService")
-        local channels = TextChatService:FindFirstChild("TextChannels")
-        local channel = channels and (channels:FindFirstChild("RBXGeneral") or channels:GetChildren()[1])
-        if channel and channel.SendAsync then
-            channel:SendAsync(message)
-            sent = true
-        end
-    end)
-
-    if not sent then
-        pcall(function()
-            game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, "All")
-            sent = true
-        end)
-    end
-
-    if not sent then
-        if setclipboard then setclipboard(message) elseif toclipboard then toclipboard(message) end
-        print("OpenViz Admin: Could not send chat automatically. Command copied/printed: " .. message)
-    end
+    if setclipboard then setclipboard(commandJson) elseif toclipboard then toclipboard(commandJson) end
+    OpenVizNotify("OpenViz Admin", "Command copied. Paste it as whitelist.json command.", 6)
+    print('OpenViz Admin: Paste this into whitelist.json as "command": ' .. commandJson)
 end
 
 local function computeTargetPos(index, t, hrp)
@@ -862,10 +866,10 @@ if AdminSec then
             adminTarget = "others"
         end
     end})
-    AdminSec:button({name="Stop Target Visualizer", callback=function()
+    AdminSec:button({name="Copy Stop Command", callback=function()
         sendOpenVizAdminCommand("stop", adminTarget)
     end})
-    AdminSec:button({name="Reset Target", callback=function()
+    AdminSec:button({name="Copy Reset Command", callback=function()
         sendOpenVizAdminCommand("reset", adminTarget)
     end})
 end
